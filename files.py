@@ -1,4 +1,7 @@
+import md5
 import shutil
+import subprocess
+import urllib2
 import os
 
 def as_unicode(st):
@@ -42,6 +45,10 @@ def replace_all(text, replacements):
     text = text.replace(k, v)
   return text
 
+class HeadRequest(urllib2.Request):
+  def get_method(self):
+    return "HEAD"
+
 def download_if_changed(url, output_dir, local_name):
   """
   Download the url to the output_dir if it has changed according to the md5 ETag (this only really works for S3 URLs).
@@ -66,3 +73,14 @@ def download_if_changed(url, output_dir, local_name):
     if local_md5 != remote_md5:
       raise StandardError('Download failed, md5 checksum does not match: %s' % file)
   return local_path
+
+def read_secret(what):
+  secret_path = '~/.%ssecret' % what
+  file_name = os.path.expanduser(secret_path)
+  if not os.path.isfile(file_name):
+    raise StandardError(r'No access file to %s in: %s Format is: username\npassword\n' % (what, secret_path))
+  perms = oct(os.stat(file_name).st_mode)[-3:]
+  if not perms == '600':
+    raise StandardError('Wrong permissions for secret file. Please run:\n  chmod 600 %s' % secret_path)
+  with open(file_name) as f:
+    return f.read().split('\n')[0:2]
