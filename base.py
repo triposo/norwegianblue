@@ -187,7 +187,7 @@ def unicode(st):
 def copy_with_replacement(src_path, dst_path, replacements):
   src_file = file(src_path)
   dst_file = file(dst_path, "w")
-  content = as_unicode(src_file.read())
+  content = unicode(src_file.read())
   content = replace_all(content, replacements)
   dst_file.write(content.encode('utf-8'))
   dst_file.close()
