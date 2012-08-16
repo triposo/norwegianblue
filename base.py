@@ -1,6 +1,9 @@
 #!/usr/bin/python
 
 # Bunch of utility functions.
+import md5
+import subprocess
+import urllib2
 import fnmatch
 import hashlib
 import operator
