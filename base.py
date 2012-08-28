@@ -194,7 +194,7 @@ def copy_with_replacement(src_path, dst_path, replacements):
   src_file.close()
 
 
-def copytree_with_replacement(src_dir, dst_dir, replacements=frozenset(), replace_extensions=None, ignores=frozenset({'.svn', '.git', 'gen', 'build'})):
+def copytree_with_replacement(src_dir, dst_dir, replacements=frozenset(), replace_extensions=None, ignores=frozenset({'.svn', '.git', 'gen', 'build', 'guides'})):
   for src in os.listdir(src_dir):
     if src in ignores:
       continue
