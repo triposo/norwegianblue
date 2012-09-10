@@ -528,7 +528,7 @@ def run_maptask(mapper, key_value_iterator, out_shards, markerfn, task_id):
     out_shards[base.shard_for_key(k, out_shard_num)][k] = v
     count('flush-out')
   for out_shard in out_shards:
-    if not out_shard is None:
+    if out_shard is not None:
       out_shard.close()
   file(markerfn, 'w').write('DONE')
 
