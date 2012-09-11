@@ -238,7 +238,6 @@ def download_if_changed(url, output_dir, local_name):
     with open(local_path) as f:
       local_md5 = md5.md5(f.read()).hexdigest()
   if remote_md5 != local_md5:
-    print '%s -> %s' % (url, local_name)
     if not os.path.isdir(output_dir):
       os.makedirs(output_dir)
     subprocess.check_call('cd %s && curl -o "%s" "%s"' % (output_dir, local_name, url), shell=True)
