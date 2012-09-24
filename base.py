@@ -107,6 +107,23 @@ def move_sharded(src, dst):
     move_store(s, d)
 
 
+def copy_store(src, dst):
+  if os.path.isfile(src):
+    shutil.copy(src, dst)
+  else:
+    shutil.copy(src + '.dst', dst + '.dst')
+    shutil.copy(src + '.idx', dst + '.idx')
+
+
+def copy_sharded(src, dst):
+  src = expand_spec(src)
+  dst = expand_spec(dst)
+  if len(src) != len(dst):
+    raise ValueError('moving shared with unequal shard sizes (%s -> %s)' % (src, dst))
+  for s, d in zip(src, dst):
+    copy_store(s, d)
+
+
 def tokenize(what, lowercase=True):
   if what == []:
     return what
