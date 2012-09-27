@@ -56,12 +56,10 @@ PICKLERS = {None: PickleSerializer,
            'gzip': ZLibPickleSerializer}
 
 class SingleStore(object):
-  def __init__(self, fname, mode='r', protocol=-1, compression=None, buffering=-1):
+  def __init__(self, fname, mode='r', compression=None, buffering=-1):
     self._open = False
     self._fname = fname
     self._mode = mode
-    self._protocol = protocol
-    self._serializer = PICKLERS[self._compression]()
     file_mode = mode
     if mode == 'a':
       file_mode += '+'
@@ -82,9 +80,11 @@ class SingleStore(object):
       self._datafile.seek(p)
     elif mode == 'w':
       self.write_header(compression)
+    self._serializer = PICKLERS[self._compression]()
 
   def read_header(self, requested_compression):
-    self._header = self._serializer.load(self._datafile)
+    serializer = PICKLERS[None]()
+    self._header = serializer.load(self._datafile)
     compression = self._header.get('compression')
     if requested_compression and requested_compression != compression:
       raise DataStoreError('%s compression asked, but store is in %s compression' % (requested_compression, compression))
@@ -96,7 +96,8 @@ class SingleStore(object):
               'version': VERSION,
               'compression': compression}
     self._compression = compression
-    self._serializer.dump(self._datafile, header, self._protocol)
+    serializer = PICKLERS[None]()
+    serializer.dump(self._datafile, header)
 
   def read_index_if_needed(self):
     if self._index is None:
@@ -111,7 +112,7 @@ class SingleStore(object):
   def flush(self):
     if self._mode in ['a', 'w']:
       if not self._index is None:
-        self._serializer.dump(file(self._fname + '.idx', 'wb'), self._index, self._protocol)
+        self._serializer.dump(file(self._fname + '.idx', 'wb'), self._index)
       self._datafile.flush()
 
   def items(self):
@@ -140,8 +141,8 @@ class SingleStore(object):
     if key in self._index:
       raise KeyError('Can only set a key once (%s)' % key)
     self._index[key] = self._datafile.tell()
-    self._serializer.dump(self._datafile, key, self._protocol)
-    self._serializer.dump(self._datafile, value, self._protocol)
+    self._serializer.dump(self._datafile, key)
+    self._serializer.dump(self._datafile, value)
 
   def __getitem__(self, key):
     self.read_index_if_needed()
@@ -183,8 +184,8 @@ class MultiStore(SingleStore):
   def __setitem__(self, key, value):
     self.read_index_if_needed()
     self._index.setdefault(key, []).append(self._datafile.tell())
-    self._serializer.dump(self._datafile, key, self._protocol)
-    self._serializer.dump(self._datafile, value, self._protocol)
+    self._serializer.dump(self._datafile, key)
+    self._serializer.dump(self._datafile, value)
 
   def __getitem__(self, key):
     res = []
