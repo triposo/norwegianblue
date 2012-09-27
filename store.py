@@ -5,12 +5,9 @@ import cPickle
 import operator
 import glob
 import os
-import re
 import struct
 import zlib
 import pymongo
-import pymongo.code
-import bson.son
 
 import base
 
@@ -22,39 +19,49 @@ class DataStoreError(Exception):
   pass
 
 
-def Unpickle(fd):
-  return cPickle.Unpickler(fd).load()
+class Serializer(object):
+  def load(self, fd):
+    raise NotImplemented
+
+  def dump(self, fd, obj):
+    raise NotImplemented
 
 
-def Pickle(fd, obj, protocol=-1):
-  cPickle.Pickler(fd, protocol).dump(obj)
+class PickleSerializer(Serializer):
+  def load(self, fd):
+    return cPickle.Unpickler(fd).load()
+
+  def dump(self, fd, obj):
+    cPickle.Pickler(fd, -1).dump(obj)
 
 
-def UnpickleZlib(fd):
-  buf = fd.read(4)
-  length = struct.unpack('I', buf)[0]
-  buf = fd.read(length)
-  s = zlib.decompress(buf)
-  return cPickle.loads(s)
+class ZLibPickleSerializer(Serializer):
+  def load(self, fd):
+    buf = fd.read(4)
+    length = struct.unpack('I', buf)[0]
+    buf = fd.read(length)
+    s = zlib.decompress(buf)
+    return cPickle.loads(s)
+
+  def dump(self, fd, obj):
+    s  = cPickle.dumps(obj)
+    buf = zlib.compress(s)
+    length = struct.pack('I', len(buf))
+    fd.write(length)
+    fd.write(buf)
 
 
-def PickleZlib(fd, obj, protocol=-1):
-  s  = cPickle.dumps(obj)
-  buf = zlib.compress(s)
-  length = struct.pack('I', len(buf))
-  fd.write(length)
-  fd.write(buf)
 
+PICKLERS = {None: PickleSerializer,
+           'gzip': ZLibPickleSerializer}
 
-PICKLERS = {None: (Unpickle, Pickle),
-           'gzip': (UnpickleZlib, PickleZlib)}
-
-class SingleStore:
+class SingleStore(object):
   def __init__(self, fname, mode='r', protocol=-1, compression=None, buffering=-1):
     self._open = False
     self._fname = fname
     self._mode = mode
     self._protocol = protocol
+    self._serializer = PICKLERS[self._compression]()
     file_mode = mode
     if mode == 'a':
       file_mode += '+'
@@ -75,10 +82,9 @@ class SingleStore:
       self._datafile.seek(p)
     elif mode == 'w':
       self.write_header(compression)
-    self._UnpickleData, self._PickleData = PICKLERS[self._compression]
 
   def read_header(self, requested_compression):
-    self._header = Unpickle(self._datafile)
+    self._header = self._serializer.load(self._datafile)
     compression = self._header.get('compression')
     if requested_compression and requested_compression != compression:
       raise DataStoreError('%s compression asked, but store is in %s compression' % (requested_compression, compression))
@@ -90,11 +96,11 @@ class SingleStore:
               'version': VERSION,
               'compression': compression}
     self._compression = compression
-    Pickle(self._datafile, header, self._protocol)
+    self._serializer.dump(self._datafile, header, self._protocol)
 
   def read_index_if_needed(self):
     if self._index is None:
-      self._index = Unpickle(file(self._index_file_name, 'rb'))
+      self._index = self._serializer.load(file(self._index_file_name, 'rb'))
 
   def close(self):
     if self._open:
@@ -105,7 +111,7 @@ class SingleStore:
   def flush(self):
     if self._mode in ['a', 'w']:
       if not self._index is None:
-        Pickle(file(self._fname + '.idx', 'wb'), self._index, self._protocol)
+        self._serializer.dump(file(self._fname + '.idx', 'wb'), self._index, self._protocol)
       self._datafile.flush()
 
   def items(self):
@@ -115,8 +121,8 @@ class SingleStore:
     self.read_header(self._compression)
     while True:
       try:
-        key = Unpickle(self._datafile)
-        val = self._UnpickleData(self._datafile)
+        key = self._serializer.load(self._datafile)
+        val = self._serializer.load(self._datafile)
       except EOFError:
         break
       yield key, val
@@ -134,16 +140,16 @@ class SingleStore:
     if key in self._index:
       raise KeyError('Can only set a key once (%s)' % key)
     self._index[key] = self._datafile.tell()
-    Pickle(self._datafile, key, self._protocol)
-    self._PickleData(self._datafile, value, self._protocol)
+    self._serializer.dump(self._datafile, key, self._protocol)
+    self._serializer.dump(self._datafile, value, self._protocol)
 
   def __getitem__(self, key):
     self.read_index_if_needed()
     self._datafile.seek(self._index[key])
-    key2 = Unpickle(self._datafile)
+    key2 = self._serializer.load(self._datafile)
     if key2 != key:
       raise DataStoreError('Inconsistent store')
-    return self._UnpickleData(self._datafile)
+    return self._serializer.load(self._datafile)
 
   def __del__(self):
     self.close()
@@ -177,8 +183,8 @@ class MultiStore(SingleStore):
   def __setitem__(self, key, value):
     self.read_index_if_needed()
     self._index.setdefault(key, []).append(self._datafile.tell())
-    Pickle(self._datafile, key, self._protocol)
-    Pickle(self._datafile, value, self._protocol)
+    self._serializer.dump(self._datafile, key, self._protocol)
+    self._serializer.dump(self._datafile, value, self._protocol)
 
   def __getitem__(self, key):
     res = []
@@ -196,10 +202,10 @@ class MultiStore(SingleStore):
       return
     for pos in lst:
       self._datafile.seek(pos)
-      key2 = Unpickle(self._datafile)
+      key2 = self._serializer.load(self._datafile)
       if key2 != key:
         raise DataStoreError('Inconsistent store')
-      yield Unpickle(self._datafile)
+      yield self._serializer.load(self._datafile)
 
 
 class Store(object):
@@ -333,6 +339,7 @@ class MongoStore(object):
     dest_db_name, dest_collection_name = MongoStore.parse_spec(dest)
     if dest_db_name != self.collection.database.name:
       raise StandardError('can not merge_into across databases')
+    import pymongo.code
     f = pymongo.code.Code("db['%s'].find().forEach("
                           "  function(obj) {"
                           "    var _id = obj._id;"
