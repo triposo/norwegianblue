@@ -23,8 +23,15 @@ class Serializer(object):
   def load(self, fd):
     raise NotImplemented
 
+  def load_key_value(self, fd):
+    return self.load(fd), self.load(fd)
+
   def dump(self, fd, obj):
     raise NotImplemented
+
+  def dump_key_value(self, fd, key, value):
+    self.dump(fd, key)
+    self.dump(fd, value)
 
 
 class PickleSerializer(Serializer):
@@ -36,6 +43,9 @@ class PickleSerializer(Serializer):
 
 
 class ZLibPickleSerializer(Serializer):
+  def __init__(self):
+    self._pickler = PickleSerializer()
+
   def load(self, fd):
     buf = fd.read(4)
     length = struct.unpack('I', buf)[0]
@@ -43,12 +53,19 @@ class ZLibPickleSerializer(Serializer):
     s = zlib.decompress(buf)
     return cPickle.loads(s)
 
+  def load_key_value(self, fd):
+    return self._pickler.load(fd), self.load(fd)
+
   def dump(self, fd, obj):
     s  = cPickle.dumps(obj)
     buf = zlib.compress(s)
     length = struct.pack('I', len(buf))
     fd.write(length)
     fd.write(buf)
+
+  def dump_key_value(self, fd, key, value):
+    self._pickler.dump(fd, key)
+    self.dump(fd, value)
 
 
 
@@ -122,11 +139,10 @@ class SingleStore(object):
     self.read_header(self._compression)
     while True:
       try:
-        key = self._serializer.load(self._datafile)
-        val = self._serializer.load(self._datafile)
+        key_value = self._serializer.load_key_value(self._datafile)
       except EOFError:
         break
-      yield key, val
+      yield key_value
 
   def values(self):
     for k, v in self.items():
@@ -141,16 +157,15 @@ class SingleStore(object):
     if key in self._index:
       raise KeyError('Can only set a key once (%s)' % key)
     self._index[key] = self._datafile.tell()
-    self._serializer.dump(self._datafile, key)
-    self._serializer.dump(self._datafile, value)
+    self._serializer.dump_key_value(self._datafile, key, value)
 
   def __getitem__(self, key):
     self.read_index_if_needed()
     self._datafile.seek(self._index[key])
-    key2 = self._serializer.load(self._datafile)
+    key2, value = self._serializer.load_key_value(self._datafile)
     if key2 != key:
       raise DataStoreError('Inconsistent store')
-    return self._serializer.load(self._datafile)
+    return value
 
   def __del__(self):
     self.close()
@@ -184,8 +199,7 @@ class MultiStore(SingleStore):
   def __setitem__(self, key, value):
     self.read_index_if_needed()
     self._index.setdefault(key, []).append(self._datafile.tell())
-    self._serializer.dump(self._datafile, key)
-    self._serializer.dump(self._datafile, value)
+    self._serializer.dump_key_value(self._datafile, key, value)
 
   def __getitem__(self, key):
     res = []
@@ -203,10 +217,10 @@ class MultiStore(SingleStore):
       return
     for pos in lst:
       self._datafile.seek(pos)
-      key2 = self._serializer.load(self._datafile)
+      key2, value = self._serializer.load_key_value(self._datafile)
       if key2 != key:
         raise DataStoreError('Inconsistent store')
-      yield self._serializer.load(self._datafile)
+      yield value
 
 
 class Store(object):
