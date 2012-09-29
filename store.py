@@ -2,6 +2,7 @@
 
 # Datastore: store data
 import cPickle
+import json
 import operator
 import glob
 import os
@@ -12,7 +13,7 @@ import pymongo
 import base
 
 FORMAT = 'Datastore'
-VERSION = 0.1
+VERSION = 1.0
 
 
 class DataStoreError(Exception):
@@ -20,6 +21,9 @@ class DataStoreError(Exception):
 
 
 class Serializer(object):
+  def __init__(self, version):
+    self._version = version
+
   def load(self, fd):
     raise NotImplemented
 
@@ -43,18 +47,24 @@ class PickleSerializer(Serializer):
 
 
 class ZLibPickleSerializer(Serializer):
-  def __init__(self):
-    self._pickler = PickleSerializer()
+  def __init__(self, version):
+    super(ZLibPickleSerializer, self).__init__(version)
+    self._pickler = PickleSerializer(version)
 
   def load(self, fd):
     buf = fd.read(4)
+    if len(buf) == 0:
+      return None
     length = struct.unpack('I', buf)[0]
     buf = fd.read(length)
     s = zlib.decompress(buf)
     return cPickle.loads(s)
 
   def load_key_value(self, fd):
-    return self._pickler.load(fd), self.load(fd)
+    if self._version < 1.0:
+      return self._pickler.load(fd), self.load(fd)
+    else:
+      return self.load(fd)
 
   def dump(self, fd, obj):
     s  = cPickle.dumps(obj)
@@ -64,13 +74,43 @@ class ZLibPickleSerializer(Serializer):
     fd.write(buf)
 
   def dump_key_value(self, fd, key, value):
-    self._pickler.dump(fd, key)
-    self.dump(fd, value)
+    if self._version < 1.0:
+      self._pickler.dump(fd, key)
+      self.dump(fd, value)
+    else:
+      return self.dump(fd, (key, value))
 
 
+class ZLibJsonSerializer(Serializer):
+  def __init__(self, version):
+    super(ZLibJsonSerializer, self).__init__(version)
+    self._pickler = PickleSerializer(version)
+
+  def load(self, fd):
+    buf = fd.read(4)
+    if len(buf) == 0:
+      return None
+    length = struct.unpack('I', buf)[0]
+    buf = fd.read(length)
+    s = zlib.decompress(buf)
+    return json.loads(s)
+
+  def load_key_value(self, fd):
+    return self.load(fd)
+
+  def dump(self, fd, obj):
+    s  = json.dumps(obj)
+    buf = zlib.compress(s)
+    length = struct.pack('I', len(buf))
+    fd.write(length)
+    fd.write(buf)
+
+  def dump_key_value(self, fd, key, value):
+    return self.dump(fd, (key, value))
 
 PICKLERS = {None: PickleSerializer,
-           'gzip': ZLibPickleSerializer}
+           'gzip': ZLibPickleSerializer,
+           'json': ZLibJsonSerializer}
 
 class SingleStore(object):
   def __init__(self, fname, mode='r', compression=None, buffering=-1):
@@ -97,23 +137,26 @@ class SingleStore(object):
       self._datafile.seek(p)
     elif mode == 'w':
       self.write_header(compression)
-    self._serializer = PICKLERS[self._compression]()
+    self._serializer = PICKLERS[self._compression](self._version)
 
   def read_header(self, requested_compression):
-    serializer = PICKLERS[None]()
+    serializer = PICKLERS[None](0)
     self._header = serializer.load(self._datafile)
     compression = self._header.get('compression')
     if requested_compression and requested_compression != compression:
       raise DataStoreError('%s compression asked, but store is in %s compression' % (requested_compression, compression))
     self._version = self._header['version']
+    self._format = self._header['format']
     self._compression = compression
 
   def write_header(self, compression):
-    header = {'format': FORMAT,
-              'version': VERSION,
-              'compression': compression}
+    self._version = VERSION
     self._compression = compression
-    serializer = PICKLERS[None]()
+    self._format = FORMAT
+    header = {'format': self._format,
+              'version': self._version,
+              'compression': self._compression}
+    serializer = PICKLERS[None](0)
     serializer.dump(self._datafile, header)
 
   def read_index_if_needed(self):
@@ -140,6 +183,8 @@ class SingleStore(object):
     while True:
       try:
         key_value = self._serializer.load_key_value(self._datafile)
+        if not key_value:
+          break
       except EOFError:
         break
       yield key_value
