@@ -2,6 +2,8 @@
 
 # Datastore: store data
 import cPickle
+import hashlib
+import heapq
 import json
 import operator
 import glob
@@ -15,6 +17,10 @@ import base
 FORMAT = 'Datastore'
 VERSION = 1.0
 
+BYTE_FLOAT_1 = 1.0 / (1 << 8)
+BYTE_FLOAT_2 = 1.0 / (1 << 16)
+BYTE_FLOAT_3 = 1.0 / (1 << 24)
+BYTE_FLOAT_4 = 1.0 / (1 << 32)
 
 class DataStoreError(Exception):
   pass
@@ -112,6 +118,127 @@ PICKLERS = {None: PickleSerializer,
            'gzip': ZLibPickleSerializer,
            'json': ZLibJsonSerializer}
 
+
+class StoreIndex(object):
+  def __init__(self, filename, mode, serializer):
+    self._filename = filename
+    self._mode = mode
+    self._serializer = serializer
+    if self._mode == 'w':
+      self._index = {}
+    else:
+      self._index = None
+
+  def flush(self):
+    if not self._index is None:
+      self._serializer.dump(file(self._filename, 'wb'), self._index)
+
+  def read_index_if_needed(self):
+    if self._index is None:
+      self._index = self._serializer.load(file(self._filename, 'rb'))
+
+  def __len__(self):
+    self.read_index_if_needed()
+    return len(self._index)
+
+  def __setitem__(self, key, value):
+    self._index[key] = value
+
+  def __getitem__(self, key):
+    self.read_index_if_needed()
+    return self._index[key]
+
+  def __contains__(self, key):
+    self.read_index_if_needed()
+    return key in self._index
+
+  def keys(self):
+    self.read_index_if_needed()
+    return self._index.keys()
+
+  def values(self):
+    self.read_index_if_needed()
+    return self._index.values()
+
+  def setdefault(self, key, param):
+    self.read_index_if_needed()
+    self._index.setdefault(key, param)
+
+  def get(self, key):
+    self.read_index_if_needed()
+    self._index.get(key)
+
+
+class FingerprintedStoreIndex(object):
+  def __init__(self, filename, mode):
+    self._filename = filename
+    self._mode = mode
+    if self._mode == 'w':
+      self._queue = []
+    else:
+      self._index = None
+
+  def fingerprint(self, key):
+    return hashlib.md5(key).digest()[:8]
+
+  def fp_to_float(self, fp):
+    b1, b2, b3, b4 = struct.unpack('BBBB', fp)
+    return BYTE_FLOAT_1 * b1 + BYTE_FLOAT_2 * b2 + BYTE_FLOAT_3 * b3 + BYTE_FLOAT_4 * b4
+
+  def interpolate(self, first_fp, first_index, last_fp, last_index, fp):
+    if first_fp == fp:
+      return first_index
+    if last_fp == fp:
+      return last_index
+    diff = last_index - first_index
+    first_as_float = self.fp_to_float(first_fp)
+    last_as_float = self.fp_to_float(last_fp)
+    cur_as_float = self.fp_to_float(fp)
+    return first_index + (last_index - first_index) * (cur_as_float - first_as_float) / (last_as_float - first_as_float)
+
+
+  def flush(self):
+    if not self._index is None:
+      self._serializer.dump(file(self._filename, 'wb'), self._index)
+
+  def read_index_if_needed(self):
+    if self._index is None:
+      self._index = self._serializer.load(file(self._filename, 'rb'))
+      self._first = 0
+      self._last = 0
+      self._count = 0
+
+  def __len__(self):
+    if self._mode == 'w':
+      return len(self._queue)
+    else:
+      self.read_index_if_needed()
+      return len(self._index)
+
+  def __setitem__(self, key, value):
+    if self._mode != 'w':
+      raise DataStoreError('Cannot write to readonly store')
+    fp = self.fingerprint(key)
+    heapq.heappush((fp, value))
+
+  def __getitem__(self, key):
+    value = self.get(key)
+    if value is None:
+      raise KeyError(key)
+    return value
+
+  def __contains__(self, key):
+    return not self.get(key) is None
+
+  def get(self, key):
+    if self._mode != 'r':
+      raise DataStoreError('Cannot read from writable store')
+    self.read_index_if_needed()
+    fp = self.fingerprint(key)
+    index = self.interpolate(self._first, 0, self._last, self._count, fp)
+    return self._index[key]
+
+
 class SingleStore(object):
   def __init__(self, fname, mode='r', compression=None, buffering=-1):
     self._open = False
@@ -122,11 +249,6 @@ class SingleStore(object):
       file_mode += '+'
     file_mode += 'b'
     self._datafile = file(fname + '.dst', file_mode, buffering=buffering)
-    if mode in ['a', 'r'] and os.path.isfile(fname + '.idx'):
-      self._index = None
-      self._index_file_name = fname + '.idx'
-    else:
-      self._index = {}
     self._open = True
     if mode == 'r':
       self.read_header(compression)
@@ -138,6 +260,7 @@ class SingleStore(object):
     elif mode == 'w':
       self.write_header(compression)
     self._serializer = PICKLERS[self._compression](self._version)
+    self._index = StoreIndex(fname + '.idx', mode, self._serializer)
 
   def read_header(self, requested_compression):
     serializer = PICKLERS[None](0)
@@ -159,10 +282,6 @@ class SingleStore(object):
     serializer = PICKLERS[None](0)
     serializer.dump(self._datafile, header)
 
-  def read_index_if_needed(self):
-    if self._index is None:
-      self._index = self._serializer.load(file(self._index_file_name, 'rb'))
-
   def close(self):
     if self._open:
       self._open = False
@@ -171,8 +290,7 @@ class SingleStore(object):
 
   def flush(self):
     if self._mode in ['a', 'w']:
-      if not self._index is None:
-        self._serializer.dump(file(self._fname + '.idx', 'wb'), self._index)
+      self._index.flush()
       self._datafile.flush()
 
   def items(self):
@@ -194,18 +312,15 @@ class SingleStore(object):
       yield v
 
   def __len__(self):
-    self.read_index_if_needed()
     return len(self._index)
 
   def __setitem__(self, key, value):
-    self.read_index_if_needed()
     if key in self._index:
       raise KeyError('Can only set a key once (%s)' % key)
     self._index[key] = self._datafile.tell()
     self._serializer.dump_key_value(self._datafile, key, value)
 
   def __getitem__(self, key):
-    self.read_index_if_needed()
     self._datafile.seek(self._index[key])
     key2, value = self._serializer.load_key_value(self._datafile)
     if key2 != key:
@@ -216,15 +331,12 @@ class SingleStore(object):
     self.close()
 
   def __contains__(self, key):
-    self.read_index_if_needed()
     return key in self._index
 
   def keys(self):
-    self.read_index_if_needed()
     return self._index.keys()
 
   def get(self, key, default=None):
-    self.read_index_if_needed()
     if key in self._index:
       return self[key]
     else:
@@ -238,11 +350,9 @@ class MultiStore(SingleStore):
   """MultiStore is a DataStore that allows multiple values per key. It is not a perfect match."""
 
   def __len__(self):
-    self.read_index_if_needed()
     return [len(v) for v in self._index.values()]
 
   def __setitem__(self, key, value):
-    self.read_index_if_needed()
     self._index.setdefault(key, []).append(self._datafile.tell())
     self._serializer.dump_key_value(self._datafile, key, value)
 
@@ -256,7 +366,6 @@ class MultiStore(SingleStore):
       res.append(v)
   
   def iterate_values_at(self, key):
-    self.read_index_if_needed()
     lst = self._index.get(key)
     if not lst:
       return
