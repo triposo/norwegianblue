@@ -8,9 +8,12 @@ import os
 import re
 import struct
 import zlib
-import pymongo
-import pymongo.code
-import bson.son
+try:
+  import pymongo
+  import pymongo.code
+  import bson.son
+except:
+  pass
 
 import base
 
@@ -291,7 +294,6 @@ class MongoStore(object):
   fingeprint field and keeps meta information around about the last changed time.
   """
   TAG = 'mongo:'
-  GEO_INDEX =[("loc", pymongo.GEO2D)]
 
   def __init__(self, spec, indexes=None, update=False):
     db_name, collection_name = MongoStore.parse_spec(spec)
