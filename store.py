@@ -10,7 +10,6 @@ import glob
 import os
 import struct
 import zlib
-import pymongo
 
 import base
 
@@ -131,11 +130,13 @@ class StoreIndex(object):
 
   def flush(self):
     if not self._index is None:
-      self._serializer.dump(file(self._filename, 'wb'), self._index)
+      with file(self._filename, 'wb') as fd:
+        self._serializer.dump(fd, self._index)
 
   def read_index_if_needed(self):
     if self._index is None:
-      self._index = self._serializer.load(file(self._filename, 'rb'))
+      with file(self._filename, 'rb') as fd:
+        self._index = self._serializer.load(fd)
 
   def __len__(self):
     self.read_index_if_needed()
@@ -170,11 +171,15 @@ class StoreIndex(object):
 
 
 class FingerprintedStoreIndex(object):
+
+  BYTES_PER_RECORD = 12
+
   def __init__(self, filename, mode):
     self._filename = filename
     self._mode = mode
     if self._mode == 'w':
-      self._queue = []
+      self._heap = []
+      self._index = []
     else:
       self._index = None
 
@@ -190,7 +195,6 @@ class FingerprintedStoreIndex(object):
       return first_index
     if last_fp == fp:
       return last_index
-    diff = last_index - first_index
     first_as_float = self.fp_to_float(first_fp)
     last_as_float = self.fp_to_float(last_fp)
     cur_as_float = self.fp_to_float(fp)
@@ -198,28 +202,36 @@ class FingerprintedStoreIndex(object):
 
 
   def flush(self):
-    if not self._index is None:
-      self._serializer.dump(file(self._filename, 'wb'), self._index)
+    if self._mode != 'w':
+      raise DataStoreError('Cannot flush readonly store')
+    index = bytearray(len(self._heap) * FingerprintedStoreIndex.BYTES_PER_RECORD)
+    offset = 0
+    while self._heap:
+      fp, value = heapq.heappop(self._heap)
+      index[offset:offset + 8] = fp
+      index[offset + 8:offset + 4] = value
+      offset += FingerprintedStoreIndex.BYTES_PER_RECORD
+    file(self._filename, 'wb').write(index)
 
   def read_index_if_needed(self):
     if self._index is None:
-      self._index = self._serializer.load(file(self._filename, 'rb'))
-      self._first = 0
+      self._index = file(self._filename, 'rb').read()
+      self._first = self._index[:4]
+      self._count = len(self._index) / FingerprintedStoreIndex.BYTES_PER_RECORD
       self._last = 0
-      self._count = 0
 
   def __len__(self):
     if self._mode == 'w':
-      return len(self._queue)
+      return len(self._heap)
     else:
       self.read_index_if_needed()
-      return len(self._index)
+      return self._count
 
   def __setitem__(self, key, value):
     if self._mode != 'w':
       raise DataStoreError('Cannot write to readonly store')
     fp = self.fingerprint(key)
-    heapq.heappush((fp, value))
+    heapq.heappush(self._heap, (fp, value))
 
   def __getitem__(self, key):
     value = self.get(key)
@@ -459,120 +471,10 @@ class Store(object):
     return self._shards[n]
 
 
-class MongoStore(object):
-  """A class implementing the store interface based on MongoDb.
-
-  The store is mapped almost 1:1 on a mongo collection, but keeps automatically a
-  fingeprint field and keeps meta information around about the last changed time.
-  """
-  TAG = 'mongo:'
-  GEO_INDEX =[("loc", pymongo.GEO2D)]
-
-  def __init__(self, spec, indexes=None, update=False):
-    db_name, collection_name = MongoStore.parse_spec(spec)
-    self.update = update
-    self.db = pymongo.Connection()[db_name]
-    self.collection = self.db[collection_name]
-    if indexes:
-      for index in indexes:
-        self.collection.ensure_index(index)
-    self.collection_name = collection_name
-
-  @classmethod
-  def parse_spec(cls, spec):
-    if spec.startswith(MongoStore.TAG):
-      spec = spec[len(MongoStore.TAG):]
-    db_name, collection_name = spec.split('/')
-    return db_name, collection_name
-
-  @classmethod
-  def move(cls, src, dest):
-    src_db_name, src_collection_name = MongoStore.parse_spec(src)
-    dest_db_name, dest_collection_name = MongoStore.parse_spec(dest)
-    if src_db_name != dest_db_name:
-      raise StandardError('can not move a collection across databases')
-    db = pymongo.Connection()[src_db_name]
-    db[src_collection_name].rename(dest_collection_name, dropTarget=True)
-
-  @classmethod
-  def exists(cls, spec):
-    db_name, collection_name = MongoStore.parse_spec(spec)
-    db = pymongo.Connection()[db_name]
-    return collection_name in db.collection_names()
-
-  def set_update(self, update):
-    self.update = update
-
-  def merge_into(self, dest):
-    """Merge all values from src into dest."""
-    dest_db_name, dest_collection_name = MongoStore.parse_spec(dest)
-    if dest_db_name != self.collection.database.name:
-      raise StandardError('can not merge_into across databases')
-    import pymongo.code
-    f = pymongo.code.Code("db['%s'].find().forEach("
-                          "  function(obj) {"
-                          "    var _id = obj._id;"
-                          "    delete obj._id;"
-                          "    db['%s'].update({_id: _id}, {'$set': obj});"
-                          "  })" % (self.collection_name, dest_collection_name))
-    self.collection.database.eval(f)
-
-  @classmethod
-  def delete(cls, spec):
-    db_name, collection_name = MongoStore.parse_spec(spec)
-    db = pymongo.Connection()[db_name]
-    db.drop_collection(collection_name)
-
-  def close(self):
-    pass
-
-  def flush(self):
-    pass
-
-  def values(self):
-    return self.collection.find()
-
-  def items(self):
-    for value in self.collection.find():
-      yield value['_id'], value
-
-  def __len__(self):
-    return self.collection.count()
-
-  def __setitem__(self, key, value):
-    d = dict(value)
-    d['_id'] = key
-    d['fp'] = base.fingerprint(key)
-    if self.update:
-      self.collection.update({'_id': key}, d, upsert=True)
-    else:
-      self.collection.insert(d)
-
-  def __getitem__(self, key):
-    return self.collection.find_one(key)
-
-  def get(self, key, default=None):
-    value = self.__getitem__(key)
-    if value is None:
-      return default
-    return value
-
-  def __del__(self):
-    self.close()
-
-  def __contains__(self, key):
-    return not self.__getitem__(key) is None
-
-  def keys(self):
-    for value in self.collection.find():
-      yield value['_id']
-
 
 def open(spec, shards=None, mode='r', DataStoreType=SingleStore, compression=None, buffering=-1, mongo_indexes=None):
-  """Utility function to open either a mongo collection or a store. If spec == '' or None a dummy will be returned."""
+  """Utility function to open a store. If spec == '' or None a dummy will be returned."""
   if not spec:
     return {}
-  elif spec.startswith(MongoStore.TAG):
-    return MongoStore(spec, mongo_indexes)
   else:
     return Store(spec, shards, mode, DataStoreType, compression, buffering)

@@ -6,6 +6,11 @@ import json
 import time
 import cPickle
 
+import store
+
+import cProfile
+
+
 OBJECT_TO_SAFE = {'comes_from': 18082382,
                   u'coo_sources': {u'facebook': (40.21088, -8.42709),
                                    u'touristeye': (40.21051, -8.42856)},
@@ -57,6 +62,29 @@ def test_pickl():
   x = cPickle.dumps(OBJECT_TO_SAFE)
   y = cPickle.loads(x)
 
+
+def benchmark_write_read_store(count=1000):
+  start_time = time.time()
+  s = store.Store('/tmp/store', mode='w', compression='json')
+  for i in range(count):
+    s[str(i)] = OBJECT_TO_SAFE
+  s.close()
+  print 'writing:', time.time() - start_time
+  start_time = time.time()
+  s = store.Store('/tmp/store')
+  total = 0
+  for k, v in s.items():
+    total += len(v)
+  print total / len(v)
+  print 'iterating:', time.time() - start_time
+  start_time = time.time()
+  s = store.Store('/tmp/store')
+  total = 0
+  for i in range(count):
+    total += len(s[str(i)])
+  print 'lookups:', time.time() - start_time
+
+
 def benchmark(method, count):
   start_time = time.time()
   for i in xrange(count):
@@ -64,8 +92,9 @@ def benchmark(method, count):
   return (time.time() - start_time) / count
 
 if __name__ == '__main__':
-  print 'json:', benchmark(test_json, 1000)
-  print 'pickl:', benchmark(test_pickl, 1000)
+  #cProfile.run('benchmark_write_read_store()')
+  print 'json:', benchmark(test_json, 1000) * 10000
+  print 'pickl:', benchmark(test_pickl, 1000) * 10000
 
 
 
